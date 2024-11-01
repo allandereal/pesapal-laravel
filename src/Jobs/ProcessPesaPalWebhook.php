@@ -35,40 +35,6 @@ class ProcessPesaPalWebhook implements ShouldQueue
      */
     public function handle()
     {
-        // Do we have an order with this intent?
-        $cart = null;
-        $order = null;
-
-        if ($this->orderId) {
-            $order = Order::find($this->orderId);
-
-            if ($order->placed_at) {
-                return;
-            }
-        }
-
-        if (! $order) {
-            $cart = Cart::where('meta->payment_intent', '=', $this->paymentIntentId)->first();
-        }
-
-        if (! $cart && ! $order) {
-            Log::error(
-                "Unable to find cart with intent {$this->paymentIntentId}"
-            );
-
-            return;
-        }
-
-        $payment = Payments::driver('stripe')->withData([
-            'payment_intent' => $this->paymentIntentId,
-        ]);
-
-        if ($order) {
-            $payment->order($order)->authorize();
-
-            return;
-        }
-
-        $payment->cart($cart->calculate())->authorize();
+        //
     }
 }

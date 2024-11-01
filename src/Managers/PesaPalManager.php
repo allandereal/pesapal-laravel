@@ -2,223 +2,151 @@
 
 namespace AllanDereal\PesaPal\Managers;
 
-use Illuminate\Support\Collection;
-use AllanDereal\PesaPal\Models\Cart;
-use AllanDereal\PesaPal\Enums\CancellationReason;
-use Stripe\Charge;
-use Stripe\Exception\ApiErrorException;
-use Stripe\Exception\InvalidRequestException;
-use Stripe\PaymentIntent;
-use Stripe\PaymentMethod;
-use Stripe\Stripe;
-use Stripe\StripeClient;
+use AllanDereal\PesaPal\DataTransferObjects\PesaPalConfig;
+use AllanDereal\PesaPal\Enums\ApiEndpoint;
+use Exception;
+use Illuminate\Http\Client\ConnectionException;
+use Illuminate\Support\Facades\Cache;
+use Illuminate\Support\Facades\Http;
+use Illuminate\Support\Str;
 
 class PesaPalManager
 {
+    protected ?PesaPalConfig $config = null;
     public function __construct()
     {
-        Stripe::setApiKey(config('services.stripe.key'));
+        $this->config = new PesaPalConfig();
     }
 
-    /**
-     * Return the Stripe client
-     */
-    public function getClient(): StripeClient
+    protected function initRequest(): void
     {
-        return new StripeClient([
-            'api_key' => config('services.stripe.key'),
-        ]);
+        //
     }
 
-    public function getCartIntentId(Cart $cart): ?string
+    public function getToken(): string
     {
-        return $cartModel->meta['payment_intent'] ?? $cart->paymentIntents->first()?->intent_id;
-    }
-
-    public function fetchOrCreateIntent(Cart $cart, array $createOptions = []): PaymentIntent
-    {
-        $existingIntentId = $this->getCartIntentId($cart);
-
-        $intent = $existingIntentId ? $this->fetchIntent($existingIntentId) : $this->createIntent($cart, $createOptions);
-
-        /**
-         * If the payment intent is stored in the meta, we don't have a linked payment intent
-         * then it's a "legacy" cart, we should make a new record.
-         */
-        if (! empty($cart->meta['payment_intent']) && ! $cart->paymentIntents->first()) {
-            $cart->paymentIntents()->create([
-                'intent_id' => $intent->id,
-                'status' => $intent->status,
-            ]);
-        }
-
-        return $intent;
-    }
-
-    public function getPaymentMethod(string $paymentMethodId): ?PaymentMethod
-    {
-        try {
-            return PaymentMethod::retrieve($paymentMethodId);
-        } catch (ApiErrorException $e) {
-        }
-
-        return null;
-    }
-
-    /**
-     * Create a payment intent from a Cart
-     */
-    public function createIntent(Cart $cart, array $opts = []): PaymentIntent
-    {
-        $existingId = $this->getCartIntentId($cart);
-
-        if (
-            $existingId &&
-            $intent = $this->fetchIntent(
-                $existingId
-            )
-        ) {
-            return $intent;
-        }
-
-        $paymentIntent = $this->buildIntent(
-            $cart->total->value,
-            $cart->currency->code,
-            $opts
-        );
-
-        $cart->paymentIntents()->create([
-            'intent_id' => $paymentIntent->id,
-            'status' => $paymentIntent->status,
-        ]);
-
-        return $paymentIntent;
-    }
-
-    public function updateShippingAddress(Cart $cart): void
-    {
-        $address = $cart->shippingAddress;
-
-        if (! $address) {
-            $this->updateIntent($cart, [
-                'shipping' => [
-                    'name' => "{$address->first_name} {$address->last_name}",
-                    'phone' => $address->contact_phone,
-                    'address' => [
-                        'city' => $address->city,
-                        'country' => $address->country->iso2,
-                        'line1' => $address->line_one,
-                        'line2' => $address->line_two,
-                        'postal_code' => $address->postcode,
-                        'state' => $address->state,
+        return Cache::remember('pesapal_token', 270, function () { //4.5 minutes
+            $response = Http::acceptJson()
+                ->asJson()
+                ->post(
+                    url: $this->config->getBaseUrl().ApiEndpoint::REQUEST_TOKEN->value,
+                    data: [
+                        'consumer_key' => $this->config->getConsumerKey(),
+                        'consumer_secret' => $this->config->getConsumerSecret(),
                     ],
+                );
+
+            if ($response->successful()) {
+                return  $response->object()?->token;
+            }
+
+            throw new Exception('Unable to retrieve token');
+        });
+    }
+
+    public function registerIpn(string $url, string $notificationType = 'GET'): array
+    {
+        $response = Http::asJson()
+            ->acceptJson()
+            ->withToken($this->getToken())
+            ->post(
+                url: $this->config->getBaseUrl().ApiEndpoint::REGISTER_IPN->value,
+                data: [
+                    'url' => $url,
+                    'ipn_notification_type' => $notificationType,
                 ],
-            ]);
-        }
-    }
-
-    public function updateIntent(Cart $cart, array $values): void
-    {
-        $intentId = $this->getCartIntentId($cart);
-
-        if (! $intentId) {
-            return;
-        }
-
-        $this->updateIntentById($intentId, $values);
-    }
-
-    public function updateIntentById(string $id, array $values): void
-    {
-        $this->getClient()->paymentIntents->update(
-            $id,
-            $values
         );
-    }
 
-    public function syncIntent(Cart $cart): void
-    {
-        $intentId = $this->getCartIntentId($cart);
-
-        if (! $intentId) {
-            return;
+        if ($response->successful()) {
+            return $response->json();
         }
 
-        $cart = $cart->calculate();
-
-        $this->getClient()->paymentIntents->update(
-            $intentId,
-            ['amount' => $cart->total->value]
-        );
-    }
-
-    public function cancelIntent(Cart $cart, CancellationReason $reason): void
-    {
-        $intentId = $this->getCartIntentId($cart);
-
-        if (! $intentId) {
-            return;
-        }
-
-        try {
-            $this->getClient()->paymentIntents->cancel(
-                $intentId,
-                ['cancellation_reason' => $reason->value]
-            );
-        } catch (\Exception $e) {
-
-        }
+        throw new Exception('Unable to create IPN');
     }
 
     /**
-     * Fetch an intent from the Stripe API.
+     * @throws ConnectionException
      */
-    public function fetchIntent(string $intentId, $options = null): ?PaymentIntent
+    public function getIpnList(): array
     {
-        try {
-            $intent = PaymentIntent::retrieve($intentId, $options);
-        } catch (InvalidRequestException $e) {
-            return null;
-        }
-
-        return $intent;
-    }
-
-    public function getCharges(string $paymentIntentId): Collection
-    {
-        try {
-            return collect(
-                $this->getClient()->charges->all([
-                    'payment_intent' => $paymentIntentId,
-                ])['data'] ?? null
+        $response = Http::asJson()
+            ->acceptJson()
+            ->withToken($this->getToken())
+            ->get(
+                url: $this->config->getBaseUrl().ApiEndpoint::LIST_IPNS->value,
             );
-        } catch (\Exception $e) {
-            //
+
+        if ($response->successful()) {
+            return $response->json();
         }
 
-        return collect();
-    }
-
-    public function getCharge(string $chargeId): Charge
-    {
-        return $this->getClient()->charges->retrieve($chargeId);
+        throw new Exception('Unable to retrieve ipn list');
     }
 
     /**
-     * Build the intent
+     * @throws ConnectionException
+     *
+     * @return array ['request'=>[], 'response'=>[]]
      */
-    protected function buildIntent(int $value, string $currencyCode, array $opts = []): PaymentIntent
+    public function submitOrderRequest(array $payload): array
     {
-        $params = [
-            'amount' => $value,
-            'currency' => $currencyCode,
-            'automatic_payment_methods' => ['enabled' => true],
-            'capture_method' => config('lunar.stripe.policy', 'automatic'),
-        ];
+        //TODO: validate payload. (make sure some required values are set.)
+        $response = Http::asJson()
+            ->acceptJson()
+            ->withToken($this->getToken())
+            ->post(
+                url: $this->config->getBaseUrl().ApiEndpoint::CREATE_PAYMENT_REQUEST->value,
+                data: $data = [
+                    'id' => $payload['order_id'] ?? Str::random(32),
+                    'currency' => $payload['currency'] ?? 'UGX',
+                    'amount' => $payload['amount'],
+                    'description' => $payload['description'] ?? config('app.name').' Collection',
+                    'callback_url' => $this->config->getWebhookUrl(),
+                    'notification_id' => $payload['notification_id'] ?? $this->config->getIpnId(),
+                    'billing_address' => $payload['billing_address'] ?? [
+                        'email_address' => 'email@example.com',
+                        'phone_number' => '',
+                        'country_code' => '',
+                        'first_name' => '',
+                        'middle_name' => '',
+                        'last_name' => '',
+                        'line_1' => '',
+                        'line_2' => '',
+                        'city' => '',
+                        'state' => '',
+                        'postal_code' => '',
+                        'zip_code' => ''
+                    ]
+                ],
+            );
 
-        return PaymentIntent::create([
-            ...$params,
-            ...$opts,
-        ]);
+        if ($response->successful()) {
+            return [$data, $response->json()];
+        }
+
+        throw new Exception('Unable to create Order Request');
+    }
+
+    /**
+     * @throws ConnectionException
+     * @throws Exception
+     */
+    public function getOrderRequestStatus(string $orderTrackingId): array
+    {
+        $response = Http::asJson()
+            ->acceptJson()
+            ->withToken($this->getToken())
+            ->get(
+                url: $this->config->getBaseUrl().ApiEndpoint::GET_PAYMENT_REQUEST->value,
+                query: [
+                    'orderTrackingId' => $orderTrackingId
+                ]
+            );
+
+        if ($response->successful()) {
+            return $response->json();
+        }
+
+        throw new Exception('Unable to retrieve order request status');
     }
 }

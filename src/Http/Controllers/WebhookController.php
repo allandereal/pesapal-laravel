@@ -2,57 +2,68 @@
 
 namespace AllanDereal\PesaPal\Http\Controllers;
 
+use AllanDereal\PesaPal\Facades\PesaPal;
+use AllanDereal\PesaPal\Models\PesaPalOrderRequest;
 use Exception;
 use Illuminate\Http\JsonResponse;
+use Illuminate\Http\RedirectResponse;
 use Illuminate\Http\Request;
 use Illuminate\Routing\Controller;
 use Illuminate\Support\Facades\Log;
-use AllanDereal\PesaPal\Concerns\ConstructsWebhookEvent;
-use AllanDereal\PesaPal\Jobs\ProcessPesaPalWebhook;
-use AllanDereal\PesaPal\Models\PesaPalTransaction;
 
 final class WebhookController extends Controller
 {
-    public function __invoke(Request $request): JsonResponse
+    public function webhook(Request $request): RedirectResponse
     {
-        $secret = config('services.stripe.webhooks.lunar');
-        $stripeSig = $request->header('Stripe-Signature');
-
         try {
-            $event = app(ConstructsWebhookEvent::class)->constructEvent(
-                $request->getContent(),
-                $stripeSig,
-                $secret
-            );
+            $this->checkOrderRequestStatus($request);
         } catch (Exception $e) {
-            Log::error(
-                $error = $e->getMessage()
-            );
-
-            return response()->json([
-                'webhook_successful' => false,
-                'message' => $error,
-            ], 400);
+            //
         }
 
-        $paymentIntent = $event->data->object->id;
-        $orderId = $event->data->object->metadata?->order_id;
+        return redirect(config('pesapal.redirect_path'));
+    }
 
-        // Is this payment intent already being processed?
-        $paymentIntentModel = PesaPalTransaction::where('intent_id', $paymentIntent)->first();
-
-        if (! $paymentIntentModel?->processing_at) {
-            $paymentIntentModel?->update([
-                'event_id' => $event->id,
-            ]);
-            ProcessPesaPalWebhook::dispatch($paymentIntent, $orderId)->delay(
-                now()->addSeconds(5)
-            );
+    public function ipn(Request $request): JsonResponse
+    {
+        try {
+            $this->checkOrderRequestStatus($request);
+        } catch (Exception $e) {
+            return response()->json(['status' => 500]);
         }
 
         return response()->json([
-            'webhook_successful' => true,
-            'message' => 'Webook handled successfully',
+            'orderNotificationType' => 'IPNCHANGE',
+            'orderTrackingId' => $request->OrderTrackingId,
+            'orderMerchantReference' => $request->OrderMerchantReference,
+            'status' => 200
         ]);
+    }
+
+    /**
+     * @throws Exception
+     */
+    protected function checkOrderRequestStatus(Request $request): void
+    {
+        $request->validate([
+            'OrderTrackingId' => 'required',
+            'OrderMerchantReference' => 'required', //TODO: validate exists in the DB
+        ]);
+
+        try {
+            $response = PesaPal::getOrderRequestStatus($request->OrderTrackingId);
+        } catch (Exception $e) {
+            Log::error($message = 'Error fetching pesapal order request: '. $e->getMessage());
+            throw new Exception($message);
+        }
+
+        if($orderRequest = PesaPalOrderRequest::firstWhere('merchant_reference', $request->OrderMerchantReference)){
+            $orderRequest->update([
+                'status' => $response['status_code'],
+                'status_check_data' => is_null($orderRequest->status_check_data) ? [$response] : [...$orderRequest->status_check_data, $response]
+            ]);
+        }
+
+        //TODO: dispatch job to notify of status change
     }
 }

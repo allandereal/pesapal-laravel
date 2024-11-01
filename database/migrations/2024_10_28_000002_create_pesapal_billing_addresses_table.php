@@ -10,6 +10,7 @@ return new class extends Migration
     {
         Schema::create(config('pesapal.table_prefix').'billing_addresses', function (Blueprint $table) {
             $table->id();
+            $table->foreignId('user_id')->nullable()->constrained('users');
             $table->string('email_address')->nullable();
             $table->string('phone_number')->nullable();
             $table->string('country_code')->nullable();

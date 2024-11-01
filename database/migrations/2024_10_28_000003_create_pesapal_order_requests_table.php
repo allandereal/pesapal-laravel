@@ -10,18 +10,18 @@ return new class extends Migration
     {
         Schema::create(config('pesapal.table_prefix').'order_requests', function (Blueprint $table) {
             $table->id();
-            $table->string('identifier');
             $table->string('currency');
             $table->double('amount');
+            $table->string('merchant_reference');
+            $table->string('order_tracking_id');
             $table->text('description')->nullable();
             $table->string('callback_url');
-            $table->foreignId('notification_id')
-                ->constrained(config('pesapal.table_prefix').'ipn_urls', 'ipn_id');
+            $table->string('notification_id');
             $table->foreignId('billing_address_id')
-                ->constrained(config('pesapal.table_prefix') . config('pesapal.billing_address_model')::getInstance()->getTable(), 'id');
+                ->constrained(config('pesapal.table_prefix') . app(config('pesapal.billing_address_model'))->getTable(), 'id');
             $table->json('response_data')->nullable();
             $table->json('status_check_data')->nullable();
-            $table->string('status')->default('pending');
+            $table->integer('status')->nullable();
             $table->timestamps();
         });
     }
