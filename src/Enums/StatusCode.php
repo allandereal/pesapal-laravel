@@ -13,4 +13,14 @@ enum StatusCode: int
     {
         return strtolower($status) === 'completed' && $code === self::COMPLETED->value;
     }
+
+    public function title(): string
+    {
+        return match ($this) {
+            self::INVALID => 'Invalid',
+            self::COMPLETED => 'Completed',
+            self::FAILED => 'Failed',
+            self::REVERSED => 'Reversed',
+        };
+    }
 }
