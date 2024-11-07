@@ -2,15 +2,15 @@
 
 namespace AllanDereal\PesaPal\Actions;
 
-use AllanDereal\PesaPal\Models\BillingAddress;
 use AllanDereal\PesaPal\Models\PesaPalOrderRequest;
+use Exception;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Log;
 
 class StorePaymentRequest
 {
     /**
-     * @throws \Exception
+     * @throws Exception
      */
     public function store(array $data): PesaPalOrderRequest
     {
@@ -34,7 +34,7 @@ class StorePaymentRequest
             ]);
 
             DB::commit();
-        } catch (\Exception $e) {
+        } catch (Exception $e) {
             Log::error('Error Storing Payment Request: ' . $e->getMessage());
             DB::rollBack();
             throw $e;
